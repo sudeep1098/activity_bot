@@ -1,164 +1,144 @@
 #!/bin/bash
 # ============================================================
-#   Activity Bot - Full Setup & Run Script (macOS)
+#   Activity Bot - Setup & Run (macOS / Linux)
+#   For Windows use: setup.bat
 #   IDE Priority: Antigravity > VS Code > Chrome-only mode
 # ============================================================
 
 set -e
 
-PROJECT_DIR="/Users/apple/Sites/activity"
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
-
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 info()    { echo -e "${GREEN}[✔]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
 error()   { echo -e "${RED}[✘]${NC} $1"; exit 1; }
 section() { echo -e "\n${YELLOW}══ $1 ══${NC}"; }
 
-# ── 1. Xcode Command Line Tools ────────────────────────────
-section "Xcode Command Line Tools"
-if ! xcode-select -p &>/dev/null; then
-    warn "Installing Xcode Command Line Tools..."
-    xcode-select --install
-    echo "  -> Follow the popup to install, then re-run this script."
-    exit 0
-else
-    info "Xcode CLI tools already installed"
+OS="$(uname -s)"
+
+# ── Optional folder argument ───────────────────
+# Usage: bash setup.sh [project-folder]
+# Example: bash setup.sh /var/www/html/myproject
+FOLDER_ARG=""
+if [[ -n "$1" ]]; then
+    FOLDER_ARG="--folder $1"
+    echo "  Project folder override: $1"
 fi
 
-# ── 2. Homebrew ────────────────────────────────────────────
-section "Homebrew"
-if ! command -v brew &>/dev/null; then
-    warn "Installing Homebrew..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    if [[ -f "/opt/homebrew/bin/brew" ]]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-        echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
-    elif [[ -f "/usr/local/bin/brew" ]]; then
-        eval "$(/usr/local/bin/brew shellenv)"
+section "Platform"
+if [[ "$OS" == "Darwin" ]]; then
+    info "macOS detected"
+elif [[ "$OS" == "Linux" ]]; then
+    info "Linux detected"
+else
+    error "Unsupported platform: $OS — use setup.bat on Windows"
+fi
+
+# ── macOS: Xcode CLI & Homebrew ────────────────
+if [[ "$OS" == "Darwin" ]]; then
+    section "Xcode Command Line Tools"
+    if ! xcode-select -p &>/dev/null; then
+        warn "Installing Xcode CLI tools..."
+        xcode-select --install
+        echo "  -> Re-run this script after installation."
+        exit 0
+    else
+        info "Xcode CLI tools OK"
     fi
-    info "Homebrew installed"
-else
-    info "Homebrew already installed ($(brew --version | head -1))"
+
+    section "Homebrew"
+    if ! command -v brew &>/dev/null; then
+        warn "Installing Homebrew..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        [[ -f "/opt/homebrew/bin/brew" ]] && eval "$(/opt/homebrew/bin/brew shellenv)" \
+            && echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+        [[ -f "/usr/local/bin/brew" ]]    && eval "$(/usr/local/bin/brew shellenv)"
+        info "Homebrew installed"
+    else
+        info "Homebrew OK ($(brew --version | head -1))"
+    fi
 fi
 
-# ── 3. Python 3 ────────────────────────────────────────────
+# ── Linux: system deps ─────────────────────────
+if [[ "$OS" == "Linux" ]]; then
+    section "Linux System Dependencies"
+    MISSING=()
+    command -v xdotool  &>/dev/null || MISSING+=("xdotool")
+    command -v wmctrl   &>/dev/null || MISSING+=("wmctrl")
+    command -v python3  &>/dev/null || MISSING+=("python3")
+    command -v pip3     &>/dev/null || MISSING+=("python3-pip")
+
+    if [[ ${#MISSING[@]} -gt 0 ]]; then
+        warn "Installing: ${MISSING[*]}"
+        sudo apt-get update -qq
+        sudo apt-get install -y "${MISSING[@]}"
+    fi
+    info "System deps OK"
+fi
+
+# ── Python 3 ───────────────────────────────────
 section "Python 3"
 if ! command -v python3 &>/dev/null; then
-    warn "python3 not found — installing via Homebrew..."
-    brew install python3
-    info "Python 3 installed"
-else
-    PYVER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    info "Python $PYVER already installed"
+    [[ "$OS" == "Darwin" ]] && brew install python3 || error "python3 not found"
 fi
+PYVER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+info "Python $PYVER"
 
-# ── 4. pip ─────────────────────────────────────────────────
-section "pip"
-if ! python3 -m pip --version &>/dev/null; then
-    warn "pip not found — installing..."
-    python3 -m ensurepip --upgrade || brew install python3
-    info "pip installed"
-else
-    info "pip already installed"
-fi
-
-# ── 5. Project directory ───────────────────────────────────
-section "Project Directory"
-mkdir -p "$PROJECT_DIR"
-info "Project dir ready: $PROJECT_DIR"
-
-# ── 6. Virtual environment ─────────────────────────────────
+# ── Virtual environment ────────────────────────
 section "Virtual Environment"
 if [[ ! -d "$PROJECT_DIR/venv" ]]; then
-    warn "Creating virtual environment..."
+    warn "Creating venv..."
     python3 -m venv "$PROJECT_DIR/venv"
-    info "venv created"
-else
-    info "venv already exists"
 fi
-
 source "$PROJECT_DIR/venv/bin/activate"
-info "venv activated ($(python3 --version))"
 pip install --upgrade pip --quiet
+info "venv ready ($(python3 --version))"
 
-# ── 7. IDE Detection ───────────────────────────────────────
+# ── IDE Detection ──────────────────────────────
 section "IDE Detection"
-
 IDE_NAME=""
-IDE_PATH=""
-
-if [[ -d "/Applications/Antigravity.app" ]]; then
-    info "Antigravity IDE found — will use Antigravity for file opens"
-    IDE_NAME="Antigravity"
-    IDE_PATH="/Applications/Antigravity.app"
-elif [[ -d "/Applications/Visual Studio Code.app" ]]; then
-    info "VS Code found — will use VS Code for file opens"
-    IDE_NAME="VS Code"
-    IDE_PATH="/Applications/Visual Studio Code.app"
-else
-    warn "No IDE found (Antigravity or VS Code)"
-    echo "  -> Bot will run in Chrome-only mode (tab switching + mouse only)"
-    echo "  -> To enable IDE features, install one of:"
-    echo "       Antigravity: https://antigravity.app"
-    echo "       VS Code:     https://code.visualstudio.com"
+if [[ "$OS" == "Darwin" ]]; then
+    [[ -d "/Applications/Antigravity.app" ]]          && IDE_NAME="Antigravity"
+    [[ -z "$IDE_NAME" && -d "/Applications/Visual Studio Code.app" ]] && IDE_NAME="VS Code"
+elif [[ "$OS" == "Linux" ]]; then
+    command -v antigravity &>/dev/null                && IDE_NAME="Antigravity"
+    [[ -z "$IDE_NAME" ]] && command -v code &>/dev/null && IDE_NAME="VS Code"
 fi
 
-# ── 8. Python dependencies ─────────────────────────────────
-section "Python Dependencies"
+if [[ -n "$IDE_NAME" ]]; then
+    info "IDE found: $IDE_NAME"
+else
+    warn "No IDE found — running in Chrome-only mode"
+    echo "  -> Install Antigravity (https://antigravity.app) or VS Code to enable IDE features"
+fi
 
+# ── Python dependencies ────────────────────────
+section "Python Dependencies"
 PACKAGES=("pyautogui" "pynput")
 for pkg in "${PACKAGES[@]}"; do
-    if python3 -c "import ${pkg//-/_}" &>/dev/null 2>&1; then
-        info "$pkg already installed"
-    else
-        warn "Installing $pkg..."
-        pip install "$pkg" --quiet
-        info "$pkg installed"
-    fi
+    python3 -c "import ${pkg//-/_}" &>/dev/null && info "$pkg OK" || { pip install "$pkg" --quiet && info "$pkg installed"; }
 done
 
-if ! python3 -c "import AppKit" &>/dev/null 2>&1; then
-    warn "Installing pyobjc (required by pyautogui on macOS)..."
-    pip install pyobjc --quiet
-    info "pyobjc installed"
-else
-    info "pyobjc already installed"
+if [[ "$OS" == "Darwin" ]]; then
+    python3 -c "import AppKit" &>/dev/null || { warn "Installing pyobjc..."; pip install pyobjc --quiet; info "pyobjc installed"; }
 fi
 
-# ── 9. macOS Permissions reminder ─────────────────────────
-section "macOS Permissions Check"
-echo ""
-echo "  pyautogui needs Accessibility access to control mouse/keyboard."
-echo "  If the bot seems stuck or throws permission errors:"
-echo ""
-echo "    System Settings → Privacy & Security → Accessibility"
-echo "    → Add Terminal (or your terminal app) ✔"
-echo ""
-echo "  Also for AppleScript / Chrome control:"
-echo "    System Settings → Privacy & Security → Automation"
-echo "    → Terminal → Google Chrome ✔"
-echo ""
-
-# ── 10. Check activity_bot.py exists ──────────────────────
-section "Bot Script"
-if [[ ! -f "$PROJECT_DIR/activity_bot.py" ]]; then
-    error "activity_bot.py not found in $PROJECT_DIR — please place it there first!"
+# ── Permissions reminder ───────────────────────
+section "Permissions"
+if [[ "$OS" == "Darwin" ]]; then
+    echo "  System Settings → Privacy & Security → Accessibility   → add Terminal ✔"
+    echo "  System Settings → Privacy & Security → Automation      → Terminal → Chrome ✔"
+elif [[ "$OS" == "Linux" ]]; then
+    echo "  Ensure your user can use xdotool (usually no extra setup needed)."
+    echo "  If Chrome keyboard shortcuts fail, check xdotool is working: xdotool getactivewindow"
 fi
-info "activity_bot.py found"
 
-# ── 11. Summary & Launch ───────────────────────────────────
-section "Summary"
-echo ""
-echo "  IDE Mode    : ${IDE_NAME:-Chrome-only (no IDE found)}"
-[[ -n "$IDE_NAME" ]] && echo "  IDE Path    : $IDE_PATH"
-echo "  Bot Script  : $PROJECT_DIR/activity_bot.py"
-echo ""
-
+# ── Launch ─────────────────────────────────────
 section "Launching Activity Bot"
+[[ ! -f "$PROJECT_DIR/activity_bot.py" ]] && error "activity_bot.py not found in $PROJECT_DIR"
+echo "  IDE   : ${IDE_NAME:-Chrome-only}"
+echo "  Script: $PROJECT_DIR/activity_bot.py"
 echo ""
 cd "$PROJECT_DIR"
-python3 activity_bot.py
+python3 activity_bot.py $FOLDER_ARG

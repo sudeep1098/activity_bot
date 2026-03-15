@@ -1,20 +1,29 @@
 """
-Activity Bot - macOS Chrome Tab Switcher
-===============================================
-Features:
-  - Switches Chrome tabs every 20 seconds using AppleScript
-  - Opens target URLs if not already open
+Activity Bot - Cross-Platform Chrome Tab Switcher
+===================================================
+Platforms : macOS, Windows, Linux
+Features  :
+  - Switches Chrome tabs every 20 seconds
+    macOS   -> AppleScript
+    Windows -> pywin32 (win32gui / win32con)
+    Linux   -> xdotool
+  - Opens target URLs ONCE at startup (no duplicates)
   - Scrolls pages after switching
   - Alphabet + space keystrokes only
   - Random mouse movement
-  - Opens random files from a folder using Antigravity or VS Code (auto-detected)
-  - Falls back to Chrome-only mode if neither IDE is installed
+  - Opens random project files in detected IDE every 30 seconds
+    IDE priority: Antigravity > VS Code > Chrome-only mode
 
 Setup:
     pip install pyautogui pynput
+    # Windows only:
+    pip install pywin32
+    # Linux only (also run):
+    sudo apt install xdotool wmctrl
 
 Run:
-    python3 activity_bot.py
+    python3 activity_bot.py   (macOS / Linux)
+    python  activity_bot.py   (Windows)
 
 Controls:
     CTRL+C         = Quit
@@ -27,6 +36,15 @@ import time
 import subprocess
 import threading
 import os
+import sys
+import shutil
+import argparse
+
+# ── Platform detection ─────────────────────────
+PLATFORM = sys.platform  # "darwin" | "win32" | "linux"
+IS_MAC     = PLATFORM == "darwin"
+IS_WINDOWS = PLATFORM == "win32"
+IS_LINUX   = PLATFORM.startswith("linux")
 
 # ── Target URLs ────────────────────────────────
 TARGET_URLS = [
@@ -39,18 +57,26 @@ TARGET_URLS = [
 ]
 
 # ── IDE / Folder Config ────────────────────────
-ANTIGRAVITY_APP   = "/Applications/Antigravity.app"
-VSCODE_APP        = "/Applications/Visual Studio Code.app"
-PROJECT_FOLDER    = "/Users/apple/Sites/yardsignplus"
-IDE_OPEN_INTERVAL = 30          # seconds between file opens
+_MAC_ANTIGRAVITY = "/Applications/Antigravity.app"
+_MAC_VSCODE      = "/Applications/Visual Studio Code.app"
+_MAC_FOLDER      = "/Users/apple/Sites/yardsignplus"
+
+_WIN_ANTIGRAVITY = r"C:\Program Files\Antigravity\Antigravity.exe"
+_WIN_VSCODE      = r"C:\Program Files\Microsoft VS Code\Code.exe"
+_WIN_FOLDER      = r"E:\yardsignplus"
+
+_LIN_ANTIGRAVITY = "/usr/local/bin/antigravity"
+_LIN_VSCODE      = "/usr/bin/code"
+_LIN_FOLDER      = "/var/www/html/yardsignplus"
+
+IDE_OPEN_INTERVAL = 30
 
 # ── Config ─────────────────────────────────────
-TAB_SWITCH_INTERVAL = 20        # seconds between tab switches
+TAB_SWITCH_INTERVAL = 20
 MOUSE_MOVE_INTERVAL = (2.0, 4.0)
 MOVE_DURATION       = (0.4, 0.9)
 SAFE_MARGINS        = 80
 TYPE_INTERVAL       = 0.09
-SCROLL_CHANCE       = 0.7
 
 TYPING_WORDS = [
     "hello", "test", "sample", "random", "input",
@@ -63,55 +89,238 @@ stop_event = threading.Event()
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE    = 0.05
 
-# ── IDE Detection ──────────────────────────────
-def detect_ide():
+# ── Windows tab registry ───────────────────────
+# Pre-populated at startup from Chrome DevTools Protocol (CDP).
+# Falls back to tracking only bot-opened tabs if CDP is unavailable.
+_win_tab_registry = []
+_win_cdp_available = False   # set to True if Chrome exposes CDP on startup
+
+# ══════════════════════════════════════════════
+#   PLATFORM HELPERS
+# ══════════════════════════════════════════════
+
+# ── macOS: AppleScript ─────────────────────────
+def _mac_run_applescript(script):
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    return r.stdout.strip()
+
+def _mac_get_tab_urls():
+    out = _mac_run_applescript(
+        'tell application "Google Chrome" to get URL of every tab of window 1'
+    )
+    return [u.strip() for u in out.split(",")] if out else []
+
+def _mac_open_tab(url):
+    _mac_run_applescript(
+        f'tell application "Google Chrome" to tell window 1 '
+        f'to make new tab with properties {{URL:"{url}"}}'
+    )
+    time.sleep(1.5)
+
+def _mac_switch_tab(index):
+    _mac_run_applescript(
+        f'tell application "Google Chrome" to tell window 1 '
+        f'to set active tab index to {index}'
+    )
+    _mac_run_applescript('tell application "Google Chrome" to activate')
+    time.sleep(0.8)
+
+def _mac_focus_chrome():
+    _mac_run_applescript('tell application "Google Chrome" to activate')
+
+# ── Windows: pywin32 ───────────────────────────
+def _win_get_chrome_hwnd():
+    try:
+        import win32gui
+        hwnds = []
+        def cb(hwnd, _):
+            if win32gui.IsWindowVisible(hwnd):
+                if "Google Chrome" in win32gui.GetWindowText(hwnd):
+                    hwnds.append(hwnd)
+        win32gui.EnumWindows(cb, None)
+        return hwnds[0] if hwnds else None
+    except ImportError:
+        return None
+
+def _win_focus_chrome():
     """
-    Returns (ide_name, app_path) for the first available IDE.
-    Priority: Antigravity > VS Code > None (Chrome-only mode).
+    Focus Chrome window, launching it if not already open.
+    Uses ctypes AllowSetForegroundWindow to bypass Windows focus-steal protection,
+    which causes SetForegroundWindow to silently fail from background processes.
     """
-    if os.path.isdir(ANTIGRAVITY_APP):
-        print(f"  IDE Detect -> Antigravity found: {ANTIGRAVITY_APP}")
-        return ("antigravity", ANTIGRAVITY_APP)
-    elif os.path.isdir(VSCODE_APP):
-        print(f"  IDE Detect -> VS Code found: {VSCODE_APP}")
-        return ("vscode", VSCODE_APP)
+    try:
+        import win32gui, win32con, win32process, ctypes
+        hwnd = _win_get_chrome_hwnd()
+        if not hwnd:
+            print("  Chrome -> Not running, launching...")
+            subprocess.Popen(["start", "chrome"], shell=True)
+            time.sleep(3)
+            hwnd = _win_get_chrome_hwnd()
+        if hwnd:
+            # Allow this process to set foreground window
+            try:
+                ctypes.windll.user32.AllowSetForegroundWindow(
+                    win32process.GetWindowThreadProcessId(hwnd)[1]
+                )
+            except Exception:
+                pass
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            time.sleep(0.2)
+            # BringWindowToTop first, then SetForegroundWindow
+            try:
+                ctypes.windll.user32.BringWindowToTop(hwnd)
+            except Exception:
+                pass
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.5)
+    except Exception as e:
+        # Non-fatal — log but continue, hotkeys may still work
+        print(f"  Chrome -> Focus warning (non-fatal): {e}")
+
+def _win_open_tab(url):
+    """Open a new Chrome tab using Ctrl+T, paste URL via clipboard."""
+    _win_focus_chrome()
+    pyautogui.hotkey("ctrl", "t")
+    time.sleep(0.6)
+    # Use clipboard paste to avoid typewrite dropping characters in URLs
+    subprocess.run(["clip"], input=url.encode("utf-8"), check=True)
+    pyautogui.hotkey("ctrl", "v")
+    time.sleep(0.3)
+    pyautogui.press("enter")
+    time.sleep(2.0)
+    print(f"  Chrome -> Opened new tab: {url[:55]}")
+
+def _win_switch_tab(index):
+    _win_focus_chrome()
+    if index <= 8:
+        pyautogui.hotkey("ctrl", str(index))
     else:
-        print("  IDE Detect -> No IDE found. Running in Chrome-only mode.")
-        return (None, None)
+        pyautogui.hotkey("ctrl", "1")
+        time.sleep(0.2)
+        for _ in range(index - 1):
+            pyautogui.hotkey("ctrl", "tab")
+            time.sleep(0.15)
+    time.sleep(0.6)
 
-IDE_NAME, IDE_PATH = detect_ide()
-
-# ── AppleScript helpers ────────────────────────
-def run_applescript(script):
-    result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
-    return result.stdout.strip()
-
-def get_chrome_tab_urls():
-    """Returns list of open tab URLs in Chrome window 1."""
-    script = 'tell application "Google Chrome" to get URL of every tab of window 1'
-    output = run_applescript(script)
-    if not output:
+def _win_read_chrome_tabs_via_cdp(port=9222):
+    """
+    Read currently open Chrome tab URLs via Chrome DevTools Protocol (CDP).
+    Requires Chrome to have been launched with --remote-debugging-port=9222.
+    Returns list of URLs, or empty list if unavailable.
+    """
+    try:
+        import urllib.request, json
+        url = f"http://127.0.0.1:{port}/json"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            tabs = json.loads(resp.read().decode())
+        return [t["url"] for t in tabs if t.get("type") == "page" and t.get("url")]
+    except Exception:
         return []
-    return [u.strip() for u in output.split(",")]
 
-def open_url_in_new_tab(url):
-    script = f'tell application "Google Chrome" to tell window 1 to make new tab with properties {{URL:"{url}"}}'
-    run_applescript(script)
+def _win_get_tab_urls():
+    return list(_win_tab_registry)
+
+def _win_init_tab_registry():
+    """
+    Called ONCE at startup. Tries to read existing Chrome tabs via CDP.
+    If CDP is unavailable, registry starts empty (bot-opened tabs only).
+    """
+    global _win_cdp_available
+    cdp_tabs = _win_read_chrome_tabs_via_cdp()
+    if cdp_tabs:
+        _win_cdp_available = True
+        for url in cdp_tabs:
+            if url not in _win_tab_registry:
+                _win_tab_registry.append(url)
+        print(f"  Chrome -> CDP: read {len(cdp_tabs)} existing tab(s) from Chrome")
+    else:
+        _win_cdp_available = False
+        print("  Chrome -> CDP unavailable — will track only bot-opened tabs")
+        print("  Chrome -> Tip: launch Chrome with --remote-debugging-port=9222 to read existing tabs")
+
+# ── Linux: xdotool ────────────────────────────
+def _lin_get_chrome_wid():
+    r = subprocess.run(["xdotool", "search", "--name", "Google Chrome"],
+                       capture_output=True, text=True)
+    ids = r.stdout.strip().splitlines()
+    return ids[-1] if ids else None
+
+def _lin_focus_chrome():
+    wid = _lin_get_chrome_wid()
+    if wid:
+        subprocess.run(["xdotool", "windowactivate", "--sync", wid])
+        time.sleep(0.3)
+
+def _lin_open_tab(url):
+    _lin_focus_chrome()
+    pyautogui.hotkey("ctrl", "t")
+    time.sleep(0.5)
+    pyautogui.typewrite(url, interval=0.02)
+    pyautogui.press("enter")
     time.sleep(1.5)
     print(f"  Chrome -> Opened new tab: {url[:55]}")
 
+def _lin_switch_tab(index):
+    _lin_focus_chrome()
+    if index <= 8:
+        pyautogui.hotkey("ctrl", str(index))
+    else:
+        pyautogui.hotkey("ctrl", "1")
+        time.sleep(0.2)
+        for _ in range(index - 1):
+            pyautogui.hotkey("ctrl", "tab")
+            time.sleep(0.15)
+    time.sleep(0.6)
+
+_lin_tab_registry = []
+
+def _lin_get_tab_urls():
+    return list(_lin_tab_registry)
+
+# ══════════════════════════════════════════════
+#   UNIFIED CHROME API
+# ══════════════════════════════════════════════
+
+def focus_chrome():
+    if IS_MAC:       _mac_focus_chrome()
+    elif IS_WINDOWS: _win_focus_chrome()
+    elif IS_LINUX:   _lin_focus_chrome()
+
+def get_tab_urls():
+    if IS_MAC:       return _mac_get_tab_urls()
+    elif IS_WINDOWS: return _win_get_tab_urls()
+    elif IS_LINUX:   return _lin_get_tab_urls()
+    return []
+
+def open_url_in_new_tab(url):
+    if IS_MAC:
+        _mac_open_tab(url)
+    elif IS_WINDOWS:
+        _win_open_tab(url)
+        _win_tab_registry.append(url)
+    elif IS_LINUX:
+        _lin_open_tab(url)
+        _lin_tab_registry.append(url)
+
 def switch_to_tab_index(index):
-    """Switch Chrome to tab at 1-based index."""
-    script = f'tell application "Google Chrome" to tell window 1 to set active tab index to {index}'
-    run_applescript(script)
-    run_applescript('tell application "Google Chrome" to activate')
-    time.sleep(0.8)
+    if IS_MAC:       _mac_switch_tab(index)
+    elif IS_WINDOWS: _win_switch_tab(index)
+    elif IS_LINUX:   _lin_switch_tab(index)
 
 def ensure_urls_open():
-    """Open any target URLs that aren't already in Chrome."""
+    """Open target URLs that are not yet in the registry. Called ONCE at startup."""
     print("  Chrome -> Checking target URLs are open...")
-    open_tabs = get_chrome_tab_urls()
-    print(f"  Chrome -> Found {len(open_tabs)} open tab(s)")
+    focus_chrome()
+    time.sleep(0.8)
+
+    # Windows: try to read existing Chrome tabs via CDP before opening anything
+    if IS_WINDOWS:
+        _win_init_tab_registry()
+    elif IS_LINUX:
+        pass  # Linux registry is also bot-tracked only
+
+    open_tabs = get_tab_urls()
+    print(f"  Chrome -> {len(open_tabs)} tab(s) already tracked")
     for url in TARGET_URLS:
         already_open = any(url in tab or tab in url for tab in open_tabs)
         if not already_open:
@@ -120,27 +329,127 @@ def ensure_urls_open():
             print(f"  Chrome -> Already open: {url[:55]}")
 
 def find_tab_index_for_url(url):
-    """Find the 1-based tab index of a URL in Chrome window 1."""
-    tabs = get_chrome_tab_urls()
+    """Return 1-based index of url in the tab registry."""
+    tabs = get_tab_urls()
     for i, tab in enumerate(tabs):
         if url in tab or tab in url:
             return i + 1
     return None
 
 def switch_to_url(url):
-    """Switch to a tab with the given URL, or open it if not found."""
     idx = find_tab_index_for_url(url)
     if idx:
         switch_to_tab_index(idx)
         print(f"  Chrome -> Switched to tab {idx}: {url[:50]}")
     else:
-        print(f"  Chrome -> Not found, opening: {url[:50]}")
+        # Should not happen after ensure_urls_open, but handle gracefully
+        print(f"  Chrome -> Tab missing, reopening: {url[:50]}")
         open_url_in_new_tab(url)
         idx = find_tab_index_for_url(url)
         if idx:
             switch_to_tab_index(idx)
 
-# ── File safety filter ─────────────────────────
+# ══════════════════════════════════════════════
+#   IDE DETECTION
+# ══════════════════════════════════════════════
+
+def detect_ide():
+    """
+    Returns (ide_name, launch_cmd) for the first available IDE.
+    Priority: Antigravity > VS Code > None
+    """
+    if IS_MAC:
+        if os.path.isdir(_MAC_ANTIGRAVITY):
+            print("  IDE Detect -> Antigravity (macOS)")
+            return ("antigravity", ["open", "-a", "Antigravity"])
+        elif os.path.isdir(_MAC_VSCODE):
+            print("  IDE Detect -> VS Code (macOS)")
+            return ("vscode", ["open", "-a", "Visual Studio Code"])
+
+    elif IS_WINDOWS:
+        if os.path.isfile(_WIN_ANTIGRAVITY):
+            print("  IDE Detect -> Antigravity (Windows)")
+            return ("antigravity", [_WIN_ANTIGRAVITY])
+        # Check common VS Code install locations
+        vscode_paths = [
+            _WIN_VSCODE,
+            os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                         "Programs", "Microsoft VS Code", "Code.exe"),
+        ]
+        for p in vscode_paths:
+            if os.path.isfile(p):
+                print(f"  IDE Detect -> VS Code (Windows): {p}")
+                return ("vscode", [p])
+        # Fallback: find code.cmd on PATH (user installs add this)
+        code_cmd = shutil.which("code") or shutil.which("code.cmd")
+        if code_cmd:
+            print(f"  IDE Detect -> VS Code on PATH: {code_cmd}")
+            return ("vscode", [code_cmd])
+
+    elif IS_LINUX:
+        if os.path.isfile(_LIN_ANTIGRAVITY) or shutil.which("antigravity"):
+            cmd = shutil.which("antigravity") or _LIN_ANTIGRAVITY
+            print(f"  IDE Detect -> Antigravity (Linux): {cmd}")
+            return ("antigravity", [cmd])
+        code_cmd = shutil.which("code") or os.path.isfile(_LIN_VSCODE) and _LIN_VSCODE
+        if code_cmd:
+            print(f"  IDE Detect -> VS Code (Linux): {code_cmd}")
+            return ("vscode", [code_cmd])
+
+    print("  IDE Detect -> No IDE found. Chrome-only mode.")
+    return (None, None)
+
+def get_project_folder():
+    if IS_MAC:       return _MAC_FOLDER
+    elif IS_WINDOWS: return _WIN_FOLDER
+    elif IS_LINUX:   return _LIN_FOLDER
+    return os.path.expanduser("~/project")
+
+IDE_NAME, IDE_CMD = detect_ide()
+
+# ── CLI argument parsing ───────────────────────
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Activity Bot - Cross-Platform Chrome Tab Switcher",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument(
+        "--folder", "-f",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Project folder for IDE file opens.\n"
+            "Defaults per platform:\n"
+            f"  macOS  : {_MAC_FOLDER}\n"
+            f"  Windows: {_WIN_FOLDER}\n"
+            f"  Linux  : {_LIN_FOLDER}"
+        )
+    )
+    return parser.parse_args()
+
+_args = parse_args()
+
+def _normalize_folder(path):
+    """
+    Normalize a folder path — fixes common issues like:
+      E:image-processor  ->  E:\image-processor
+      /var/www//html     ->  /var/www/html
+    """
+    if path is None:
+        return None
+    path = path.strip()
+    if IS_WINDOWS:
+        # If path starts with a drive letter but no backslash e.g. E:folder -> E:\folder
+        import re
+        path = re.sub(r'^([A-Za-z]:)([^\\])', r'\1\\\2', path)
+    return os.path.normpath(path)
+
+PROJECT_FOLDER = _normalize_folder(_args.folder) if _args.folder else get_project_folder()
+
+# ══════════════════════════════════════════════
+#   FILE SAFETY FILTER
+# ══════════════════════════════════════════════
+
 BLOCKED_NAMES = {
     ".env", ".env.local", ".env.production", ".env.development",
     ".env.staging", ".env.test", ".env.example", ".gitignore",
@@ -160,11 +469,10 @@ BLOCKED_EXTENSIONS = {
 BLOCKED_FOLDERS = {
     "node_modules", ".git", ".svn", "__pycache__",
     ".cache", "dist", "build", ".next", ".nuxt",
-    "vendor", "var", "public",
+    "vendor", "var", "public/bundles", "public/build",
 }
 
 def is_safe_file(filename):
-    """Returns True only if the file is safe to open in an IDE."""
     name_lower = filename.lower()
     if filename.startswith("."):
         return False
@@ -176,11 +484,13 @@ def is_safe_file(filename):
     return True
 
 def get_random_file_from_folder(folder):
-    """Returns a random SAFE file path from the folder (recursive, skips blocked dirs)."""
     try:
         files = []
         for dirpath, dirnames, filenames in os.walk(folder):
-            dirnames[:] = [d for d in dirnames if d not in BLOCKED_FOLDERS and not d.startswith(".")]
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in BLOCKED_FOLDERS and not d.startswith(".")
+            ]
             for f in filenames:
                 if is_safe_file(f):
                     files.append(os.path.join(dirpath, f))
@@ -189,34 +499,45 @@ def get_random_file_from_folder(folder):
             return None
         chosen = random.choice(files)
         rel = os.path.relpath(chosen, folder)
-        print(f"  IDE -> {len(files)} safe file(s) available, picked: {rel}")
+        print(f"  IDE -> {len(files)} safe file(s) found, picked: {rel}")
         return chosen
     except Exception as e:
         print(f"  IDE -> Error walking folder: {e}")
         return None
 
-# ── IDE file opener ────────────────────────────
+# ══════════════════════════════════════════════
+#   IDE OPENER
+# ══════════════════════════════════════════════
+
 def open_file_with_ide(filepath):
-    """Opens a file using the detected IDE (Antigravity or VS Code)."""
-    if IDE_NAME == "antigravity":
-        subprocess.Popen(["open", "-a", "Antigravity", filepath])
-        print(f"  Antigravity -> Opened: {os.path.basename(filepath)}")
-    elif IDE_NAME == "vscode":
-        subprocess.Popen(["open", "-a", "Visual Studio Code", filepath])
-        print(f"  VS Code -> Opened: {os.path.basename(filepath)}")
-    else:
-        print("  IDE -> No IDE available, skipping file open.")
+    if IDE_CMD is None:
+        return
+    try:
+        if IDE_NAME == "vscode":
+            # --reuse-window: opens file in existing VS Code window instead of new instance
+            cmd = IDE_CMD + ["--reuse-window", filepath]
+        else:
+            cmd = IDE_CMD + [filepath]
+
+        if IS_WINDOWS:
+            # shell=False but use creationflags to avoid console flash
+            import subprocess as _sp
+            _sp.Popen(cmd, shell=False,
+                      creationflags=_sp.CREATE_NO_WINDOW if hasattr(_sp, "CREATE_NO_WINDOW") else 0)
+        else:
+            subprocess.Popen(cmd)
+
+        print(f"  {IDE_NAME.capitalize()} -> Opened: {os.path.basename(filepath)}")
+    except FileNotFoundError as e:
+        print(f"  IDE -> Launch failed ({e}). Check IDE path in config.")
+    except Exception as e:
+        print(f"  IDE -> Error: {e}")
 
 def ide_loop():
-    """
-    Periodically opens a random project file in the available IDE.
-    Skipped entirely if no IDE is detected (Chrome-only mode).
-    """
     if IDE_NAME is None:
-        print("[IDE LOOP] No IDE detected — IDE loop disabled.")
+        print("[IDE LOOP] No IDE detected — disabled.")
         return
-
-    time.sleep(10)  # initial delay before first run
+    time.sleep(10)
     while not stop_event.is_set():
         try:
             filepath = get_random_file_from_folder(PROJECT_FOLDER)
@@ -225,66 +546,129 @@ def ide_loop():
                 open_file_with_ide(filepath)
         except Exception as e:
             print(f"[IDE ERROR] {e}")
-
         stop_event.wait(IDE_OPEN_INTERVAL)
 
-# ── Tab switch thread ──────────────────────────
+# ══════════════════════════════════════════════
+#   TAB SWITCH LOOP
+# ══════════════════════════════════════════════
+
 def tab_switch_loop():
-    time.sleep(6)  # initial delay
+    time.sleep(6)
     while not stop_event.is_set():
         try:
             url = random.choice(TARGET_URLS)
             print(f"\n[TAB] Switching to -> {url[:55]}")
             switch_to_url(url)
-
             time.sleep(0.5)
             for _ in range(random.randint(2, 4)):
                 do_scroll()
                 time.sleep(random.uniform(0.4, 0.9))
-
         except Exception as e:
             print(f"[TAB ERROR] {e}")
-
         stop_event.wait(TAB_SWITCH_INTERVAL)
 
-# ── Mouse & keyboard ───────────────────────────
+# ══════════════════════════════════════════════
+#   MOUSE & KEYBOARD
+# ══════════════════════════════════════════════
+
+# Safe page area — avoids clicking browser chrome (toolbar, tabs)
+# Top 130px = Chrome toolbar + tab bar. We click only below that.
+CLICK_TOP_MARGIN    = 130   # px from top (below tab bar + address bar)
+CLICK_BOTTOM_MARGIN = 80    # px from bottom
+CLICK_SIDE_MARGIN   = 80    # px from sides
+
+# Keys that look like natural browsing activity
+BROWSE_KEYS = [
+    "pagedown", "pageup",
+    "down", "down", "down",   # weighted toward scrolling down
+    "up",
+    "end", "home",
+    "tab",
+    "f5",                      # refresh occasionally
+]
+
 def do_move():
+    """Move mouse to a random position on screen."""
     w, h = pyautogui.size()
     x = random.randint(SAFE_MARGINS, w - SAFE_MARGINS)
     y = random.randint(SAFE_MARGINS, h - SAFE_MARGINS)
     pyautogui.moveTo(x, y, duration=random.uniform(*MOVE_DURATION))
     print(f"  Mouse  -> ({x}, {y})")
 
+def do_click():
+    """Click a random position inside the page content area (below Chrome toolbar)."""
+    w, h = pyautogui.size()
+    x = random.randint(CLICK_SIDE_MARGIN, w - CLICK_SIDE_MARGIN)
+    y = random.randint(CLICK_TOP_MARGIN,  h - CLICK_BOTTOM_MARGIN)
+    pyautogui.moveTo(x, y, duration=random.uniform(0.3, 0.7))
+    time.sleep(random.uniform(0.1, 0.3))
+    pyautogui.click(x, y)
+    print(f"  Click  -> ({x}, {y})")
+
 def do_scroll():
+    """Scroll up or down by a random amount."""
     amount = random.choice([-5, -4, -3, -2, 2, 3, 4, 5])
     pyautogui.scroll(amount)
     direction = "up" if amount > 0 else "down"
     print(f"  Scroll -> [{direction} {abs(amount)}]")
 
 def do_type():
+    """Type a random word at the current focus point."""
     word = random.choice(TYPING_WORDS)
     pyautogui.typewrite(word, interval=TYPE_INTERVAL)
     print(f"  Type   -> \"{word}\"")
 
-# ── Main bot loop ──────────────────────────────
+def do_keypress():
+    """Press a navigation key that looks like natural page browsing."""
+    key = random.choice(BROWSE_KEYS)
+    pyautogui.press(key)
+    print(f"  Key    -> [{key}]")
+
+def do_select_all_copy():
+    """Ctrl+A + Ctrl+C — looks like copying text from a page."""
+    pyautogui.hotkey("ctrl", "a")
+    time.sleep(0.2)
+    pyautogui.hotkey("ctrl", "c")
+    print("  Keys   -> [Ctrl+A, Ctrl+C]")
+
+# ══════════════════════════════════════════════
+#   MAIN BOT LOOP
+# ══════════════════════════════════════════════
+
+# Probabilities per cycle (independent rolls)
+CLICK_CHANCE    = 0.5    # click somewhere on the page
+SCROLL_CHANCE   = 0.7    # scroll up or down
+KEYPRESS_CHANCE = 0.4    # press a navigation key
+TYPE_CHANCE     = 0.20   # type a word
+COPY_CHANCE     = 0.08   # Ctrl+A + Ctrl+C
+
 def bot_loop():
-    run_applescript('tell application "Google Chrome" to activate')
+    focus_chrome()
     time.sleep(1)
-    ensure_urls_open()
+    ensure_urls_open()   # opens tabs ONCE — registry prevents duplicates
     time.sleep(1)
 
     print("\n[BOT] Running...\n")
     cycle = 1
     while not stop_event.is_set():
-        print(f"── Cycle {cycle} ─────────────────────────")
+        print(f"-- Cycle {cycle} --")
         try:
             do_move()
+
+            if random.random() < CLICK_CHANCE:
+                do_click()
 
             if random.random() < SCROLL_CHANCE:
                 do_scroll()
 
-            if random.random() < 0.25:
+            if random.random() < KEYPRESS_CHANCE:
+                do_keypress()
+
+            if random.random() < TYPE_CHANCE:
                 do_type()
+
+            if random.random() < COPY_CHANCE:
+                do_select_all_copy()
 
         except pyautogui.FailSafeException:
             print("\n[FAILSAFE] Stopped.")
@@ -300,13 +684,18 @@ def bot_loop():
 
     print("[BOT] Loop exited.")
 
-# ── Main ───────────────────────────────────────
+# ══════════════════════════════════════════════
+#   MAIN
+# ══════════════════════════════════════════════
+
 def main():
-    ide_label = IDE_NAME.capitalize() if IDE_NAME else "None (Chrome-only mode)"
+    platform_label = {"darwin": "macOS", "win32": "Windows"}.get(PLATFORM, "Linux")
+    ide_label      = IDE_NAME.capitalize() if IDE_NAME else "None (Chrome-only mode)"
 
     print("=" * 58)
-    print("   Activity Bot  v8.0  (AppleScript Tab Switcher)")
+    print("   Activity Bot  v9.5  (Cross-Platform)")
     print("=" * 58)
+    print("  Platform         :", platform_label)
     print("  IDE detected     :", ide_label)
     print("  Tab switch every :", TAB_SWITCH_INTERVAL, "seconds")
     if IDE_NAME:
@@ -315,7 +704,8 @@ def main():
     print("  Rotating URLs    :")
     for u in TARGET_URLS:
         print(f"    {u}")
-    print("  Keys             : alphabet + space only")
+    folder_source = f"(--folder {PROJECT_FOLDER})" if _args.folder else "(default)"
+    print(f"  Project folder   : {PROJECT_FOLDER} {folder_source}")
     print("  CTRL+C           : Quit")
     print("  Mouse TOP-LEFT   : Emergency stop")
     print("=" * 58)
@@ -335,7 +725,7 @@ def main():
         while not stop_event.is_set():
             time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\n[BOT] CTRL+C — Quitting...")
+        print("\n[BOT] CTRL+C -- Quitting...")
         stop_event.set()
 
     bot_thread.join(timeout=3)

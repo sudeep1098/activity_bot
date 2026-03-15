@@ -1,6 +1,8 @@
 # Activity Bot 🤖
 
-A macOS automation bot that simulates human-like activity by rotating Chrome tabs, moving the mouse, scrolling pages, and opening project files in your IDE — keeping your machine looking active at all times.
+A cross-platform automation bot that simulates human-like activity by rotating Chrome tabs, moving the mouse, clicking, scrolling, and opening project files in your IDE — keeping your machine looking active at all times.
+
+Supports **macOS**, **Windows**, and **Linux**.
 
 ---
 
@@ -9,10 +11,12 @@ A macOS automation bot that simulates human-like activity by rotating Chrome tab
 | Feature | Details |
 |---|---|
 | **Chrome tab switching** | Rotates through a list of target URLs every 20 seconds |
-| **Auto tab opener** | Opens any missing target URLs automatically on startup |
-| **Page scrolling** | Scrolls up/down after each tab switch |
-| **Mouse movement** | Moves the mouse to random positions every 2–4 seconds |
-| **Typing simulation** | Occasionally types harmless words (alphabet + space only) |
+| **Auto tab opener** | Opens any missing target URLs once at startup — no duplicates |
+| **Mouse movement** | Moves to random screen positions every 2–4 seconds |
+| **Clicking** | Clicks randomly inside the page content area (50% chance per cycle) |
+| **Page scrolling** | Scrolls up/down randomly (70% chance per cycle) |
+| **Keyboard navigation** | Presses PageDown, PageUp, arrow keys, Home, End, Tab, F5 (40% chance) |
+| **Typing simulation** | Occasionally types harmless words — alphabet + space only (20% chance) |
 | **IDE file opener** | Opens random project files in your IDE every 30 seconds |
 
 ---
@@ -24,19 +28,39 @@ The bot detects your IDE automatically at startup — no config needed:
 ```
 Antigravity installed?  →  uses Antigravity
 VS Code installed?      →  uses VS Code
-Neither?                →  Chrome-only mode (tab switching + mouse only)
+Neither?                →  Chrome-only mode (tab switching + mouse + clicks only)
 ```
+
+---
+
+## Platform Support
+
+| Feature | macOS | Windows | Linux |
+|---|---|---|---|
+| Chrome tab switching | AppleScript ✅ | Ctrl+number hotkeys ✅ | xdotool ✅ |
+| Mouse movement & clicks | pyautogui ✅ | pyautogui ✅ | pyautogui ✅ |
+| IDE: Antigravity | `open -a` ✅ | `.exe` direct ✅ | binary/PATH ✅ |
+| IDE: VS Code | `open -a` ✅ | `.exe` / `code` ✅ | `code` on PATH ✅ |
+
+> **Note:** On macOS, the bot reads actual Chrome tab URLs via AppleScript for precise switching.
+> On Windows and Linux, the bot tracks URLs it opened itself and switches by tab position (Ctrl+1–8, then Ctrl+Tab).
 
 ---
 
 ## Requirements
 
-- macOS (uses AppleScript for Chrome control)
-- Google Chrome
-- Python 3.9+
-- `pyautogui`, `pynput`, `pyobjc` (installed automatically by `setup.sh`)
+- **Python 3.9+**
+- **Google Chrome** (open before running)
 
-Optional (one of):
+| Platform | Python packages | System packages |
+|---|---|---|
+| macOS | `pyautogui` `pynput` `pyobjc` | — |
+| Windows | `pyautogui` `pynput` `pywin32` | — |
+| Linux | `pyautogui` `pynput` | `xdotool` `wmctrl` |
+
+All installed automatically by the setup script.
+
+Optional IDE (one of):
 - [Antigravity IDE](https://antigravity.app)
 - [Visual Studio Code](https://code.visualstudio.com)
 
@@ -44,28 +68,62 @@ Optional (one of):
 
 ## Quick Start
 
+### macOS / Linux
 ```bash
-# 1. Clone the repo
 git clone <your-repo-url>
 cd activity
-
-# 2. Run the setup script (installs deps and launches the bot)
 bash setup.sh
 ```
 
-The setup script will:
-1. Check for Xcode CLI tools and Homebrew
-2. Install Python 3 if missing
-3. Create a virtual environment
-4. Detect your IDE (Antigravity → VS Code → Chrome-only)
-5. Install Python dependencies
-6. Launch the bot
+### Windows
+```bat
+git clone <your-repo-url>
+cd activity
+setup.bat
+```
+
+---
+
+## Dynamic Project Folder
+
+Pass a custom project folder at runtime without editing the script:
+
+### Windows
+```bat
+:: Use hardcoded default (E:\yardsignplus)
+setup.bat
+
+:: Override with a different folder
+setup.bat E:\myproject
+
+:: Or run directly
+python activity_bot.py --folder E:\myproject
+python activity_bot.py -f E:\myproject
+```
+
+### macOS / Linux
+```bash
+# Use hardcoded default
+bash setup.sh
+
+# Override with a different folder
+bash setup.sh /var/www/html/myproject
+
+# Or run directly
+python3 activity_bot.py --folder /var/www/html/myproject
+python3 activity_bot.py -f /var/www/html/myproject
+```
+
+### Help
+```bash
+python3 activity_bot.py --help
+```
 
 ---
 
 ## Configuration
 
-Edit the top of `activity_bot.py` to customise behaviour:
+Edit the top of `activity_bot.py` to change defaults:
 
 ```python
 # URLs the bot will rotate through
@@ -74,13 +132,29 @@ TARGET_URLS = [
     ...
 ]
 
-# Path to your project folder (for IDE file opens)
-PROJECT_FOLDER = "/Users/you/Sites/myproject"
+# Default project folder per platform (overridable via --folder at runtime)
+_MAC_FOLDER = "/Users/apple/Sites/yardsignplus"
+_WIN_FOLDER = r"E:\yardsignplus"
+_LIN_FOLDER = "/var/www/html/yardsignplus"
 
 # Timing
-TAB_SWITCH_INTERVAL = 20   # seconds between tab switches
-IDE_OPEN_INTERVAL   = 30   # seconds between IDE file opens
-MOUSE_MOVE_INTERVAL = (2.0, 4.0)  # seconds between mouse moves
+TAB_SWITCH_INTERVAL = 20        # seconds between tab switches
+IDE_OPEN_INTERVAL   = 30        # seconds between IDE file opens
+MOUSE_MOVE_INTERVAL = (2.0, 4.0)  # seconds between mouse move cycles
+
+# Action probabilities (0.0 – 1.0 per cycle)
+CLICK_CHANCE    = 0.5   # click inside page
+SCROLL_CHANCE   = 0.7   # scroll up or down
+KEYPRESS_CHANCE = 0.4   # navigation key press
+TYPE_CHANCE     = 0.20  # type a random word
+COPY_CHANCE     = 0.08  # Ctrl+A + Ctrl+C
+```
+
+IDE install paths (if in a non-standard location):
+```python
+_WIN_ANTIGRAVITY = r"C:\Program Files\Antigravity\Antigravity.exe"
+_WIN_VSCODE      = r"C:\Program Files\Microsoft VS Code\Code.exe"
+_LIN_VSCODE      = "/usr/bin/code"
 ```
 
 ---
@@ -94,16 +168,24 @@ MOUSE_MOVE_INTERVAL = (2.0, 4.0)  # seconds between mouse moves
 
 ---
 
-## macOS Permissions
+## Permissions
 
-On first run, macOS may prompt for permissions. You can grant them in:
-
-**System Settings → Privacy & Security**
+### macOS
+> System Settings → Privacy & Security
 
 | Permission | Required for |
 |---|---|
-| **Accessibility** | Mouse & keyboard control |
+| **Accessibility** | Mouse, keyboard & click control |
 | **Automation → Google Chrome** | AppleScript tab switching |
+
+### Windows
+- Run as a **regular user** (not Administrator)
+- Windows Defender may flag `pyautogui` — add the `activity` folder as an exclusion if needed
+- Chrome must be open before the bot starts (or it will launch it automatically)
+
+### Linux
+- Requires a display (X11). Wayland may need `xwayland` for xdotool support
+- Verify xdotool works: `xdotool getactivewindow`
 
 ---
 
@@ -111,22 +193,22 @@ On first run, macOS may prompt for permissions. You can grant them in:
 
 ```
 activity/
-├── activity_bot.py   # Main bot script
-├── setup.sh          # One-command setup & launcher
+├── activity_bot.py   # Main bot (cross-platform)
+├── setup.sh          # Setup & launcher — macOS / Linux
+├── setup.bat         # Setup & launcher — Windows
 ├── .gitignore        # Git ignore rules
-├── README.md         # This file
-└── venv/             # Python virtual environment (git-ignored)
+└── README.md         # This file
 ```
 
 ---
 
-## Safety
+## File Safety
 
-Files opened in the IDE are filtered to avoid sensitive content. The following are **never** opened:
+Files opened in the IDE are filtered — the following are **never** opened:
 
 - `.env` files and secrets (`.pem`, `.key`, `.cert`, etc.)
 - Lock files (`package-lock.json`, `composer.lock`, etc.)
 - Config files (`.yaml`, `.toml`, `.ini`, etc.)
 - Logs, databases, and archives
 - Hidden files and dotfiles
-- Dependency folders (`node_modules/`, `vendor/`, `.git/`, etc.)
+- Dependency folders (`node_modules/`, `vendor/`, `.git/`, `dist/`, `build/`, etc.)

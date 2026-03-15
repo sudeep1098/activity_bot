@@ -1,8 +1,4 @@
-# ============================================================
-#   Activity Bot - .gitignore
-# ============================================================
-
-# ── Python ─────────────────────────────────────────────────
+# ── Python ─────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
@@ -14,14 +10,14 @@ dist/
 build/
 .eggs/
 
-# ── Virtual environment ─────────────────────────────────────
+# ── Virtual environment ─────────────────────────
 venv/
 env/
 .venv/
 .env/
 ENV/
 
-# ── Environment / secrets ───────────────────────────────────
+# ── Environment / secrets ───────────────────────
 .env
 .env.*
 !.env.example
@@ -33,34 +29,37 @@ ENV/
 *.pfx
 *.der
 
-# ── Logs ───────────────────────────────────────────────────
+# ── Logs ───────────────────────────────────────
 *.log
 logs/
 
-# ── macOS system files ─────────────────────────────────────
+# ── macOS ──────────────────────────────────────
 .DS_Store
 .AppleDouble
 .LSOverride
-Icon?
 ._*
 .Spotlight-V100
 .Trashes
 .fseventsd
 
-# ── IDEs ───────────────────────────────────────────────────
-# VS Code
+# ── Windows ────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ── Linux ──────────────────────────────────────
+*~
+.nfs*
+
+# ── IDEs ───────────────────────────────────────
 .vscode/
 *.code-workspace
-
-# Antigravity
 .antigravity/
-
-# JetBrains
 .idea/
 *.iml
 
-# ── Misc ───────────────────────────────────────────────────
+# ── Misc ───────────────────────────────────────
 *.swp
 *.swo
-*~
-Thumbs.db
