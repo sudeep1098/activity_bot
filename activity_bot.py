@@ -9,7 +9,7 @@ Features  :
     Linux   -> xdotool
   - Opens target URLs ONCE at startup (no duplicates)
   - Scrolls pages after switching
-  - Alphabet + space keystrokes only
+  - Types only words from TYPING_WORDS (a-z letters, no special keys)
   - Random mouse movement
   - Opens random project files in detected IDE every 30 seconds
     IDE priority: Antigravity > VS Code > Chrome-only mode
@@ -77,6 +77,7 @@ MOUSE_MOVE_INTERVAL = (2.0, 4.0)
 MOVE_DURATION       = (0.4, 0.9)
 SAFE_MARGINS        = 80
 TYPE_INTERVAL       = 0.09
+SCROLL_CHANCE       = 0.7
 
 TYPING_WORDS = [
     "hello", "test", "sample", "random", "input",
@@ -90,10 +91,8 @@ pyautogui.FAILSAFE = True
 pyautogui.PAUSE    = 0.05
 
 # ── Windows tab registry ───────────────────────
-# Pre-populated at startup from Chrome DevTools Protocol (CDP).
-# Falls back to tracking only bot-opened tabs if CDP is unavailable.
 _win_tab_registry = []
-_win_cdp_available = False   # set to True if Chrome exposes CDP on startup
+_win_cdp_available = False
 
 # ══════════════════════════════════════════════
 #   PLATFORM HELPERS
@@ -143,11 +142,6 @@ def _win_get_chrome_hwnd():
         return None
 
 def _win_focus_chrome():
-    """
-    Focus Chrome window, launching it if not already open.
-    Uses ctypes AllowSetForegroundWindow to bypass Windows focus-steal protection,
-    which causes SetForegroundWindow to silently fail from background processes.
-    """
     try:
         import win32gui, win32con, win32process, ctypes
         hwnd = _win_get_chrome_hwnd()
@@ -157,7 +151,6 @@ def _win_focus_chrome():
             time.sleep(3)
             hwnd = _win_get_chrome_hwnd()
         if hwnd:
-            # Allow this process to set foreground window
             try:
                 ctypes.windll.user32.AllowSetForegroundWindow(
                     win32process.GetWindowThreadProcessId(hwnd)[1]
@@ -166,7 +159,6 @@ def _win_focus_chrome():
                 pass
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             time.sleep(0.2)
-            # BringWindowToTop first, then SetForegroundWindow
             try:
                 ctypes.windll.user32.BringWindowToTop(hwnd)
             except Exception:
@@ -174,18 +166,18 @@ def _win_focus_chrome():
             win32gui.SetForegroundWindow(hwnd)
             time.sleep(0.5)
     except Exception as e:
-        # Non-fatal — log but continue, hotkeys may still work
         print(f"  Chrome -> Focus warning (non-fatal): {e}")
 
 def _win_open_tab(url):
-    """Open a new Chrome tab using Ctrl+T, paste URL via clipboard."""
+    """Open a new Chrome tab and type the URL using pynput (no clipboard)."""
     _win_focus_chrome()
     pyautogui.hotkey("ctrl", "t")
     time.sleep(0.6)
-    # Use clipboard paste to avoid typewrite dropping characters in URLs
-    subprocess.run(["clip"], input=url.encode("utf-8"), check=True)
-    pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.3)
+    from pynput.keyboard import Controller as KbController
+    kb = KbController()
+    for ch in url:
+        kb.type(ch)
+        time.sleep(0.02)
     pyautogui.press("enter")
     time.sleep(2.0)
     print(f"  Chrome -> Opened new tab: {url[:55]}")
@@ -203,11 +195,6 @@ def _win_switch_tab(index):
     time.sleep(0.6)
 
 def _win_read_chrome_tabs_via_cdp(port=9222):
-    """
-    Read currently open Chrome tab URLs via Chrome DevTools Protocol (CDP).
-    Requires Chrome to have been launched with --remote-debugging-port=9222.
-    Returns list of URLs, or empty list if unavailable.
-    """
     try:
         import urllib.request, json
         url = f"http://127.0.0.1:{port}/json"
@@ -221,10 +208,6 @@ def _win_get_tab_urls():
     return list(_win_tab_registry)
 
 def _win_init_tab_registry():
-    """
-    Called ONCE at startup. Tries to read existing Chrome tabs via CDP.
-    If CDP is unavailable, registry starts empty (bot-opened tabs only).
-    """
     global _win_cdp_available
     cdp_tabs = _win_read_chrome_tabs_via_cdp()
     if cdp_tabs:
@@ -255,7 +238,11 @@ def _lin_open_tab(url):
     _lin_focus_chrome()
     pyautogui.hotkey("ctrl", "t")
     time.sleep(0.5)
-    pyautogui.typewrite(url, interval=0.02)
+    from pynput.keyboard import Controller as KbController
+    kb = KbController()
+    for ch in url:
+        kb.type(ch)
+        time.sleep(0.02)
     pyautogui.press("enter")
     time.sleep(1.5)
     print(f"  Chrome -> Opened new tab: {url[:55]}")
@@ -308,16 +295,13 @@ def switch_to_tab_index(index):
     elif IS_LINUX:   _lin_switch_tab(index)
 
 def ensure_urls_open():
-    """Open target URLs that are not yet in the registry. Called ONCE at startup."""
+    """Open target URLs that are not yet open. Called ONCE at startup."""
     print("  Chrome -> Checking target URLs are open...")
     focus_chrome()
     time.sleep(0.8)
 
-    # Windows: try to read existing Chrome tabs via CDP before opening anything
     if IS_WINDOWS:
         _win_init_tab_registry()
-    elif IS_LINUX:
-        pass  # Linux registry is also bot-tracked only
 
     open_tabs = get_tab_urls()
     print(f"  Chrome -> {len(open_tabs)} tab(s) already tracked")
@@ -329,7 +313,7 @@ def ensure_urls_open():
             print(f"  Chrome -> Already open: {url[:55]}")
 
 def find_tab_index_for_url(url):
-    """Return 1-based index of url in the tab registry."""
+    """Return 1-based index of url in the tab list."""
     tabs = get_tab_urls()
     for i, tab in enumerate(tabs):
         if url in tab or tab in url:
@@ -342,7 +326,6 @@ def switch_to_url(url):
         switch_to_tab_index(idx)
         print(f"  Chrome -> Switched to tab {idx}: {url[:50]}")
     else:
-        # Should not happen after ensure_urls_open, but handle gracefully
         print(f"  Chrome -> Tab missing, reopening: {url[:50]}")
         open_url_in_new_tab(url)
         idx = find_tab_index_for_url(url)
@@ -354,10 +337,7 @@ def switch_to_url(url):
 # ══════════════════════════════════════════════
 
 def detect_ide():
-    """
-    Returns (ide_name, launch_cmd) for the first available IDE.
-    Priority: Antigravity > VS Code > None
-    """
+    """Returns (ide_name, launch_cmd) for the first available IDE."""
     if IS_MAC:
         if os.path.isdir(_MAC_ANTIGRAVITY):
             print("  IDE Detect -> Antigravity (macOS)")
@@ -370,7 +350,6 @@ def detect_ide():
         if os.path.isfile(_WIN_ANTIGRAVITY):
             print("  IDE Detect -> Antigravity (Windows)")
             return ("antigravity", [_WIN_ANTIGRAVITY])
-        # Check common VS Code install locations
         vscode_paths = [
             _WIN_VSCODE,
             os.path.join(os.environ.get("LOCALAPPDATA", ""),
@@ -380,7 +359,6 @@ def detect_ide():
             if os.path.isfile(p):
                 print(f"  IDE Detect -> VS Code (Windows): {p}")
                 return ("vscode", [p])
-        # Fallback: find code.cmd on PATH (user installs add this)
         code_cmd = shutil.which("code") or shutil.which("code.cmd")
         if code_cmd:
             print(f"  IDE Detect -> VS Code on PATH: {code_cmd}")
@@ -391,7 +369,7 @@ def detect_ide():
             cmd = shutil.which("antigravity") or _LIN_ANTIGRAVITY
             print(f"  IDE Detect -> Antigravity (Linux): {cmd}")
             return ("antigravity", [cmd])
-        code_cmd = shutil.which("code") or os.path.isfile(_LIN_VSCODE) and _LIN_VSCODE
+        code_cmd = shutil.which("code") or (os.path.isfile(_LIN_VSCODE) and _LIN_VSCODE)
         if code_cmd:
             print(f"  IDE Detect -> VS Code (Linux): {code_cmd}")
             return ("vscode", [code_cmd])
@@ -430,16 +408,10 @@ def parse_args():
 _args = parse_args()
 
 def _normalize_folder(path):
-    """
-    Normalize a folder path — fixes common issues like:
-      E:image-processor  ->  E:\image-processor
-      /var/www//html     ->  /var/www/html
-    """
     if path is None:
         return None
     path = path.strip()
     if IS_WINDOWS:
-        # If path starts with a drive letter but no backslash e.g. E:folder -> E:\folder
         import re
         path = re.sub(r'^([A-Za-z]:)([^\\])', r'\1\\\2', path)
     return os.path.normpath(path)
@@ -514,13 +486,11 @@ def open_file_with_ide(filepath):
         return
     try:
         if IDE_NAME == "vscode":
-            # --reuse-window: opens file in existing VS Code window instead of new instance
             cmd = IDE_CMD + ["--reuse-window", filepath]
         else:
             cmd = IDE_CMD + [filepath]
 
         if IS_WINDOWS:
-            # shell=False but use creationflags to avoid console flash
             import subprocess as _sp
             _sp.Popen(cmd, shell=False,
                       creationflags=_sp.CREATE_NO_WINDOW if hasattr(_sp, "CREATE_NO_WINDOW") else 0)
@@ -571,92 +541,80 @@ def tab_switch_loop():
 #   MOUSE & KEYBOARD
 # ══════════════════════════════════════════════
 
-# Safe page area — avoids clicking browser chrome (toolbar, tabs)
-# Top 130px = Chrome toolbar + tab bar. We click only below that.
-CLICK_TOP_MARGIN    = 130   # px from top (below tab bar + address bar)
-CLICK_BOTTOM_MARGIN = 80    # px from bottom
-CLICK_SIDE_MARGIN   = 80    # px from sides
-
-# Keys that look like natural browsing activity
-BROWSE_KEYS = [
+# Safe navigation keys per platform.
+# macOS excludes f5 (triggers fn layer) and home/end (act as Cmd+Left/Right).
+_MAC_BROWSE_KEYS = [
     "pagedown", "pageup",
     "down", "down", "down",   # weighted toward scrolling down
     "up",
+    "tab",
+]
+_OTHER_BROWSE_KEYS = [
+    "pagedown", "pageup",
+    "down", "down", "down",
+    "up",
     "end", "home",
     "tab",
-    "f5",                      # refresh occasionally
+    "f5",
 ]
 
 def do_move():
-    """Move mouse to a random position on screen."""
+    """Move mouse to a random safe position."""
     w, h = pyautogui.size()
     x = random.randint(SAFE_MARGINS, w - SAFE_MARGINS)
     y = random.randint(SAFE_MARGINS, h - SAFE_MARGINS)
     pyautogui.moveTo(x, y, duration=random.uniform(*MOVE_DURATION))
     print(f"  Mouse  -> ({x}, {y})")
 
-def do_click():
-    """Click a random position inside the page content area (below Chrome toolbar)."""
-    w, h = pyautogui.size()
-    x = random.randint(CLICK_SIDE_MARGIN, w - CLICK_SIDE_MARGIN)
-    y = random.randint(CLICK_TOP_MARGIN,  h - CLICK_BOTTOM_MARGIN)
-    pyautogui.moveTo(x, y, duration=random.uniform(0.3, 0.7))
-    time.sleep(random.uniform(0.1, 0.3))
-    pyautogui.click(x, y)
-    print(f"  Click  -> ({x}, {y})")
-
 def do_scroll():
-    """Scroll up or down by a random amount."""
+    """Scroll the page up or down."""
     amount = random.choice([-5, -4, -3, -2, 2, 3, 4, 5])
     pyautogui.scroll(amount)
     direction = "up" if amount > 0 else "down"
     print(f"  Scroll -> [{direction} {abs(amount)}]")
 
 def do_type():
-    """Type a random word at the current focus point."""
+    """
+    Type a random word from TYPING_WORDS one character at a time using pynput.
+    pynput.keyboard.Controller.type() sends each character as a direct Unicode
+    input event — it does NOT simulate key codes, so fn / modifier keys are
+    never triggered on macOS or any other platform.
+    Only plain a-z letters from TYPING_WORDS are ever sent.
+    """
+    from pynput.keyboard import Controller as KbController
     word = random.choice(TYPING_WORDS)
-    pyautogui.typewrite(word, interval=TYPE_INTERVAL)
+    kb = KbController()
+    for ch in word:
+        kb.type(ch)
+        time.sleep(TYPE_INTERVAL)
     print(f"  Type   -> \"{word}\"")
 
 def do_keypress():
-    """Press a navigation key that looks like natural page browsing."""
-    key = random.choice(BROWSE_KEYS)
+    """Press a safe navigation key."""
+    keys = _MAC_BROWSE_KEYS if IS_MAC else _OTHER_BROWSE_KEYS
+    key = random.choice(keys)
     pyautogui.press(key)
     print(f"  Key    -> [{key}]")
-
-def do_select_all_copy():
-    """Ctrl+A + Ctrl+C — looks like copying text from a page."""
-    pyautogui.hotkey("ctrl", "a")
-    time.sleep(0.2)
-    pyautogui.hotkey("ctrl", "c")
-    print("  Keys   -> [Ctrl+A, Ctrl+C]")
 
 # ══════════════════════════════════════════════
 #   MAIN BOT LOOP
 # ══════════════════════════════════════════════
 
-# Probabilities per cycle (independent rolls)
-CLICK_CHANCE    = 0.5    # click somewhere on the page
-SCROLL_CHANCE   = 0.7    # scroll up or down
-KEYPRESS_CHANCE = 0.4    # press a navigation key
-TYPE_CHANCE     = 0.20   # type a word
-COPY_CHANCE     = 0.08   # Ctrl+A + Ctrl+C
+KEYPRESS_CHANCE = 0.4
+TYPE_CHANCE     = 0.25
 
 def bot_loop():
     focus_chrome()
     time.sleep(1)
-    ensure_urls_open()   # opens tabs ONCE — registry prevents duplicates
+    ensure_urls_open()
     time.sleep(1)
 
     print("\n[BOT] Running...\n")
     cycle = 1
     while not stop_event.is_set():
-        print(f"-- Cycle {cycle} --")
+        print(f"── Cycle {cycle} ─────────────────────────")
         try:
             do_move()
-
-            if random.random() < CLICK_CHANCE:
-                do_click()
 
             if random.random() < SCROLL_CHANCE:
                 do_scroll()
@@ -666,9 +624,6 @@ def bot_loop():
 
             if random.random() < TYPE_CHANCE:
                 do_type()
-
-            if random.random() < COPY_CHANCE:
-                do_select_all_copy()
 
         except pyautogui.FailSafeException:
             print("\n[FAILSAFE] Stopped.")
@@ -693,7 +648,7 @@ def main():
     ide_label      = IDE_NAME.capitalize() if IDE_NAME else "None (Chrome-only mode)"
 
     print("=" * 58)
-    print("   Activity Bot  v9.5  (Cross-Platform)")
+    print("   Activity Bot  v9.7  (Cross-Platform)")
     print("=" * 58)
     print("  Platform         :", platform_label)
     print("  IDE detected     :", ide_label)
